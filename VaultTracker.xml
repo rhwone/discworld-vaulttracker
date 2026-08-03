@@ -14,7 +14,7 @@
    date_written="2026-08-03"
    save_state="y"
    requires="4.84"
-   version="0.01"
+   version="0.02"
    >
 </plugin>
 
@@ -57,8 +57,12 @@ local iCaptureLines = 0
 
 -- window
 local win = "VaultTracker_" .. GetPluginID()
+local winR = "VaultTrackerRes_" .. GetPluginID()
 local WIN_W, WIN_H = 500, 460
 local MIN_W, MIN_H = 280, 180
+local SEARCH_H = 24
+sSearchQuery = ""
+local tSearchResults = {}
 local iWinX, iWinY = 100, 100
 local iScroll = 0
 local iLineHeight = 14
@@ -391,6 +395,7 @@ function OnVaultAlias(name, line, wildcards)
 
   elseif (sCmd == "window") then
     bWindowVisible = not bWindowVisible
+    if (not bWindowVisible) then CloseSearchResults() end
     SaveState()
     DrawVaultWindow()
     VNote("Window " .. (bWindowVisible and "shown." or "hidden."))
@@ -502,7 +507,8 @@ function DrawVaultWindow(bResizing)
 
     if (v.items ~= nil) then
       local tShow = SortedItems(v.items)
-      local iVisible = math.floor((WIN_H - BODY_Y - 4) / iLineHeight)
+      local iBodyBottom = WIN_H - SEARCH_H - 6
+      local iVisible = math.floor((iBodyBottom - BODY_Y) / iLineHeight)
       local iMax = math.max(0, #tShow - iVisible)
       if (iScroll > iMax) then iScroll = iMax end
       if (iScroll < 0) then iScroll = 0 end
@@ -511,20 +517,35 @@ function DrawVaultWindow(bResizing)
         WindowText(win, "f", tShow[i], 8, y, WIN_W - 24, y + iLineHeight, FG)
         y = y + iLineHeight
       end
-      -- scroll indicators (kept clear of the resize grip in the corner)
+      -- scroll indicators (kept clear of the search bar and resize grip)
       if (iMax > 0) then
         WindowText(win, "fb", "^", WIN_W - 16, BODY_Y + 2, WIN_W - 4, BODY_Y + 2 + iLineHeight, (iScroll > 0) and ACCENT or DIM)
-        WindowText(win, "fb", "v", WIN_W - 16, WIN_H - iLineHeight - 24, WIN_W - 4, WIN_H - 24, (iScroll < iMax) and ACCENT or DIM)
+        WindowText(win, "fb", "v", WIN_W - 16, iBodyBottom - iLineHeight, WIN_W - 4, iBodyBottom, (iScroll < iMax) and ACCENT or DIM)
         if (not bResizing) then
           WindowAddHotspot(win, "scrollup", WIN_W - 20, BODY_Y, WIN_W - 1, BODY_Y + 20, "", "", "", "", "VaultScrollUpClick", "Scroll up", 1, 0)
-          WindowAddHotspot(win, "scrolldown", WIN_W - 20, WIN_H - 44, WIN_W - 1, WIN_H - 20, "", "", "", "", "VaultScrollDownClick", "Scroll down", 1, 0)
+          WindowAddHotspot(win, "scrolldown", WIN_W - 20, iBodyBottom - 20, WIN_W - 1, iBodyBottom, "", "", "", "", "VaultScrollDownClick", "Scroll down", 1, 0)
         end
       end
       if (not bResizing) then
-        WindowAddHotspot(win, "body", 1, BODY_Y, WIN_W - 21, WIN_H - 1, "", "", "", "", "", "", 0, 0)
+        WindowAddHotspot(win, "body", 1, BODY_Y, WIN_W - 21, iBodyBottom, "", "", "", "", "", "", 0, 0)
         WindowScrollwheelHandler(win, "body", "VaultWheel")
       end
     end
+  end
+
+  -- search bar along the bottom (click to type a query)
+  local SB_TOP = WIN_H - SEARCH_H
+  WindowRectOp(win, 2, 4, SB_TOP, WIN_W - 20, WIN_H - 4, TABBG)
+  WindowRectOp(win, 1, 4, SB_TOP, WIN_W - 20, WIN_H - 4, BORDER)
+  local sHint
+  if (sSearchQuery ~= "") then
+    sHint = "Search: " .. sSearchQuery
+  else
+    sHint = "Click to search all vaults..."
+  end
+  WindowText(win, "f", sHint, 10, SB_TOP + 4, WIN_W - 24, WIN_H - 4, (sSearchQuery ~= "") and FG or DIM)
+  if (not bResizing) then
+    WindowAddHotspot(win, "searchbar", 4, SB_TOP, WIN_W - 20, WIN_H - 4, "", "", "", "", "VaultSearchClick", "Search all vaults", 2, 0)
   end
 
   -- resize grip (bottom-right corner)
@@ -539,9 +560,111 @@ function DrawVaultWindow(bResizing)
   WindowShow(win, true)
 end
 
+-- **************************
+-- ***** Search feature *****
+-- **************************
+
+function CloseSearchResults()
+  if (WindowInfo(winR, 1) ~= nil) then WindowShow(winR, false) end
+end
+
+function VaultSearchClick(flags, id)
+  local s = utils.inputbox("Search all vaults for:", "Vault Tracker", sSearchQuery or "")
+  if (s == nil) then return end -- cancelled
+  sSearchQuery = Trim(s)
+  if (sSearchQuery == "") then
+    CloseSearchResults()
+    DrawVaultWindow()
+    return
+  end
+  local q = string.lower(sSearchQuery)
+  tSearchResults = {}
+  for roomid, v in pairs(tVaults) do
+    if (v.items ~= nil) then
+      for _, sItem in ipairs(v.items) do
+        if (string.find(string.lower(sItem), q, 1, true) ~= nil) then
+          table.insert(tSearchResults, { item = sItem, roomid = roomid })
+        end
+      end
+    end
+  end
+  table.sort(tSearchResults, function(a, b) return string.lower(a.item) < string.lower(b.item) end)
+  DrawVaultWindow()
+  DrawSearchResults()
+end
+
+-- Results panel: bottom-left corner anchored to the main window's bottom-right
+-- corner, so it grows upwards and rightwards
+function DrawSearchResults()
+  local MAXROWS = 25
+  local n = #tSearchResults
+  local tRows = {}
+  for i = 1, math.min(n, MAXROWS) do
+    local r = tSearchResults[i]
+    tRows[i] = r.item .. "  (" .. (tVaults[r.roomid] and tVaults[r.roomid].name or "?") .. ")"
+  end
+  local sTitle = n .. " match(es) for '" .. sSearchQuery .. "'"
+  if (n > MAXROWS) then
+    sTitle = sTitle .. ", showing " .. MAXROWS
+  end
+  -- measure with the main window's font (same face/size)
+  local wMax = WindowTextWidth(win, "fb", sTitle) + 24
+  for _, sRow in ipairs(tRows) do
+    local w = WindowTextWidth(win, "f", sRow) + 16
+    if (w > wMax) then wMax = w end
+  end
+  local W = math.min(wMax, 700)
+  local iRows = math.max(#tRows, 1) -- room for "No matches." when empty
+  local H = (iRows * iLineHeight) + iLineHeight + 16
+  local iLeft = iWinX + WIN_W + 2
+  local iTop = iWinY + WIN_H - H
+  if (iTop < 0) then iTop = 0 end
+
+  WindowCreate(winR, iLeft, iTop, W, H, 4, 2, BG)
+  WindowSetZOrder(winR, 1000)
+  WindowFont(winR, "f", "Lucida Console", 9, false, false, false, false)
+  WindowFont(winR, "fb", "Lucida Console", 9, true, false, false, false)
+  WindowDeleteAllHotspots(winR)
+  WindowRectOp(winR, 2, 0, 0, 0, 0, BG)
+  WindowRectOp(winR, 1, 0, 0, 0, 0, ACCENT)
+
+  WindowText(winR, "fb", sTitle, 6, 4, W - 20, 4 + iLineHeight, ACCENT)
+  WindowText(winR, "fb", "X", W - 14, 4, W - 2, 4 + iLineHeight, DIM)
+  WindowAddHotspot(winR, "closeres", W - 18, 0, W - 1, 6 + iLineHeight, "", "", "", "", "VaultResultsClose", "Close results", 1, 0)
+
+  local y = 10 + iLineHeight
+  if (#tRows == 0) then
+    WindowText(winR, "f", "No matches.", 6, y, W - 6, y + iLineHeight, DIM)
+  else
+    for i, sRow in ipairs(tRows) do
+      if (i % 2 == 0) then
+        WindowRectOp(winR, 2, 2, y, W - 2, y + iLineHeight, TABBG)
+      end
+      WindowText(winR, "f", sRow, 6, y, W - 6, y + iLineHeight, FG)
+      WindowAddHotspot(winR, "res:" .. i, 2, y, W - 2, y + iLineHeight, "", "", "", "", "VaultResultClick", "Go to this vault's tab", 1, 0)
+      y = y + iLineHeight
+    end
+  end
+  WindowShow(winR, true)
+end
+
+function VaultResultClick(flags, id)
+  local r = tSearchResults[tonumber(string.sub(id, 5)) or 0]
+  CloseSearchResults()
+  if (r == nil or tVaults[r.roomid] == nil) then return end
+  sActiveTab = r.roomid
+  iScroll = 0
+  DrawVaultWindow()
+end
+
+function VaultResultsClose(flags, id)
+  CloseSearchResults()
+end
+
 -- window callbacks
 function VaultCloseClick(flags, id)
   bWindowVisible = false
+  CloseSearchResults()
   SaveState()
   DrawVaultWindow()
 end
@@ -572,6 +695,7 @@ function VaultWheel(flags, id)
 end
 
 function VaultDragMouseDown(flags, id)
+  CloseSearchResults()
   iDragStartX, iDragStartY = WindowInfo(win, 14), WindowInfo(win, 15)
 end
 
@@ -588,6 +712,7 @@ end
 local iResizeStartX, iResizeStartY, iResizeStartW, iResizeStartH = 0, 0, 0, 0
 
 function VaultResizeMouseDown(flags, id)
+  CloseSearchResults()
   iResizeStartX, iResizeStartY = WindowInfo(win, 17), WindowInfo(win, 18)
   iResizeStartW, iResizeStartH = WIN_W, WIN_H
 end
@@ -656,10 +781,12 @@ end
 
 function OnPluginClose()
   if (WindowInfo(win, 1) ~= nil) then WindowDelete(win) end
+  if (WindowInfo(winR, 1) ~= nil) then WindowDelete(winR) end
 end
 
 function OnPluginDisable()
   if (WindowInfo(win, 1) ~= nil) then WindowShow(win, false) end
+  CloseSearchResults()
 end
 
 function OnPluginEnable()
