@@ -8,6 +8,10 @@ can browse, search, and gauge fullness of all your vaults from anywhere, across 
 
 ![Requires CowBar](https://img.shields.io/badge/requires-Quow's%20CowBar-orange)
 
+**➤ Download: [VaultTracker.xml](https://raw.githubusercontent.com/rhwone/discworld-vaulttracker/main/VaultTracker.xml)**
+— right-click the link and choose *Save link as...*, then add it in MUSHclient via
+**File → Plugins → Add**. ([Full instructions below.](#installation))
+
 <img src="docs/vaulttracker-window.png" alt="The VaultTracker window: one tab per vault with a fullness dot, a colour-coded fullness line, the sorted contents list, and a search bar" width="437">
 
 ## Features
@@ -38,7 +42,8 @@ can browse, search, and gauge fullness of all your vaults from anywhere, across 
 
 ## Installation
 
-1. Download `VaultTracker.xml` and place it anywhere (e.g. next to Quow's plugins).
+1. Download [`VaultTracker.xml`](https://raw.githubusercontent.com/rhwone/discworld-vaulttracker/main/VaultTracker.xml)
+   (right-click → *Save link as...*) and place it anywhere, e.g. next to Quow's plugins.
 2. In MUSHclient: **File → Plugins → Add**, select `VaultTracker.xml`.
 
 ## Usage
