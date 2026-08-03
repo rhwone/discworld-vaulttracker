@@ -6,7 +6,7 @@ that remembers what's inside your vaults and shows them in a tabbed miniwindow.
 Look inside a vault container once and VaultTracker records its contents; from then on you
 can browse, search, and gauge fullness of all your vaults from anywhere, across sessions.
 
-![Requires CowBar](https://img.shields.io/badge/requires-Quow's%20CowBar-orange)
+[![Requires CowBar](https://img.shields.io/badge/requires-Quow's%20CowBar-orange)](https://quow.co.uk/minimap.php)
 
 **➤ Download: [VaultTracker.xml](https://raw.githubusercontent.com/rhwone/discworld-vaulttracker/main/VaultTracker.xml)**
 — right-click the link and choose *Save link as...*, then add it in MUSHclient via
@@ -40,9 +40,11 @@ can browse, search, and gauge fullness of all your vaults from anywhere, across 
 
 - MUSHclient 4.84+
 - [Quow's CowBar / minimap plugin](https://quow.co.uk/minimap.php) — VaultTracker gets its
-  room information from CowBar's GMCP rebroadcast.
+  room information from CowBar's GMCP rebroadcast. This is the only dependency; none of
+  Quow's other plugins are needed.
 - CowBar's **"Re-Broadcast GMCP Data"** option must be ON: right-click the minimap and tick
-  it (one-time setting; VaultTracker warns you if it looks disabled).
+  it (one-time setting). If VaultTracker can't see your room when you try to register a
+  vault, it tells you exactly what to do.
 
 ## Installation
 
