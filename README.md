@@ -8,6 +8,8 @@ can browse, search, and gauge fullness of all your vaults from anywhere, across 
 
 ![Requires CowBar](https://img.shields.io/badge/requires-Quow's%20CowBar-orange)
 
+<img src="docs/vaulttracker-window.png" alt="The VaultTracker window: one tab per vault with a fullness dot, a colour-coded fullness line, the sorted contents list, and a search bar" width="437">
+
 ## Features
 
 - **Automatic capture** — look in a registered vault's container and the contents are
@@ -20,7 +22,9 @@ can browse, search, and gauge fullness of all your vaults from anywhere, across 
   (green = empty → red = completely full), draggable, resizable, mouse-wheel scrolling,
   tabs wrap to multiple rows. Items sorted alphabetically (ignoring the leading quantity word).
 - **Fullness display** — the container's fullness line is shown color-coded above the contents.
-- **Search** — `vault find <text>` searches every recorded vault at once.
+- **Search** — the search bar at the bottom of the window searches every vault at once and
+  opens a result list showing which vault each hit is in; click a result to jump to that
+  vault's tab. Also available as `vault find <text>`.
 - **Persistent** — contents, window position/size, and settings survive restarts
   (MUSHclient plugin saved state).
 
@@ -57,6 +61,10 @@ vault unlock [name]       re-bind a vault to a different container
 vault forget <name>       unregister a vault
 vault help                command overview
 ```
+
+`vault help` prints the same overview in-game:
+
+<img src="docs/vault-commands.png" alt="Output of the vault help command listing every available command" width="700">
 
 ## License
 
