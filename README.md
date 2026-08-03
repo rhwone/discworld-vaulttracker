@@ -66,6 +66,22 @@ vault help                command overview
 
 <img src="docs/vault-commands.png" alt="Output of the vault help command listing every available command" width="700">
 
+## Beyond the guild vaults
+
+Nothing in VaultTracker is specific to the official vaults. It only needs a room that
+reports a GMCP room id and a container that lists its contents when you look inside, so
+in principle a chest in a rented player home should work just as well — register the room,
+look in the chest, done.
+
+Two caveats. Because each vault is keyed to its room, this only holds for **one container
+per room**: the first one you look in claims that room, and the rest are ignored (use
+`vault unlock` if it binds to the wrong one). And player housing hasn't actually been
+tested, so treat it as promising rather than proven — if you try it and it misbehaves,
+please open an issue.
+
+Note that contents are only as current as your last look; the timestamp above each list
+tells you how stale a record is.
+
 ## License
 
 MIT
