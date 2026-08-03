@@ -12,6 +12,10 @@ can browse, search, and gauge fullness of all your vaults from anywhere, across 
 — right-click the link and choose *Save link as...*, then add it in MUSHclient via
 **File → Plugins → Add**. ([Full instructions below.](#installation))
 
+---
+
+<br>
+
 <img src="docs/vaulttracker-window.png" alt="The VaultTracker window: one tab per vault with a fullness dot, a colour-coded fullness line, the sorted contents list, and a search bar" width="437">
 
 ## Features
