@@ -1,0 +1,671 @@
+<?xml version="1.0" encoding="iso-8859-1"?>
+<!DOCTYPE muclient>
+<!-- Vault contents tracker for Discworld MUD.
+     Remembers what is inside your vaults/containers per room (GMCP room id),
+     auto-updates when you look inside them, shows a tabbed miniwindow.
+     Requires Quow's CowBar (QuowMinimap) plugin for the GMCP room.info rebroadcast. -->
+<muclient>
+<plugin
+   name="VaultTracker"
+   author="rhwone"
+   id="9a7b3c5d1e2f4a6b8c0d9e1f"
+   language="Lua"
+   purpose="Vault contents tracker"
+   date_written="2026-08-03"
+   save_state="y"
+   requires="4.84"
+   version="0.01"
+   >
+</plugin>
+
+<aliases>
+  <alias enabled="y" match="^vault(?:\s+(register|show|list|forget|window|find|unlock|help)(?:\s+(.+?))?)?\s*$" regexp="y" ignore_case="y" script="OnVaultAlias" sequence="100"></alias>
+</aliases>
+
+<timers>
+  <timer name="VaultBroadcastCheck" second="30" enabled="n" one_shot="y" script="OnVaultBroadcastCheck"></timer>
+</timers>
+
+<triggers>
+  <trigger enabled="y" keep_evaluating="y" match="^(.+?) (?:is|are) ([a-z\- ]*?full) (?:with|of) (.*)$" regexp="y" script="OnVaultContentsStart" sequence="50" name="VaultContentsStart"></trigger>
+  <trigger enabled="y" keep_evaluating="y" match="^(.+?) contains (.*)$" regexp="y" script="OnVaultContentsStart" sequence="51" name="VaultContentsStart2"></trigger>
+  <trigger enabled="y" keep_evaluating="y" match="^(.+?) (?:is|are) empty\.\s*$" regexp="y" script="OnVaultEmpty" sequence="52" name="VaultEmpty"></trigger>
+  <trigger enabled="n" keep_evaluating="y" match="^(.*)$" regexp="y" script="OnVaultCaptureLine" sequence="10" name="VaultCaptureLine"></trigger>
+</triggers>
+
+<script>
+<![CDATA[
+
+require "json"
+require "serialize"
+
+local COWBAR_ID = "bfe35205f026786ea1d56e3b"
+
+-- tVaults[roomid] = { name = "AM", items = {...}, raw = "...", updated = os.time() }
+tVaults = {}
+sCurrentRoomID = ""
+sActiveTab = ""          -- roomid of the currently selected tab
+bWindowVisible = true
+
+-- capture state
+local bCapturing = false
+local sCaptureBuffer = ""
+local sCaptureRoom = ""
+local sCaptureContainer = ""
+local sCaptureFullness = ""
+local iCaptureLines = 0
+
+-- window
+local win = "VaultTracker_" .. GetPluginID()
+local WIN_W, WIN_H = 500, 460
+local MIN_W, MIN_H = 280, 180
+local iWinX, iWinY = 100, 100
+local iScroll = 0
+local iLineHeight = 14
+local iDragStartX, iDragStartY = 0, 0
+
+local BG      = ColourNameToRGB("#101010")
+local FG      = ColourNameToRGB("silver")
+local ACCENT  = ColourNameToRGB("orange")
+local DIM     = ColourNameToRGB("#707070")
+local TABBG   = ColourNameToRGB("#202020")
+local TABON   = ColourNameToRGB("#3A2A10")
+local BORDER  = ColourNameToRGB("#404040")
+
+-- ***********************
+-- ***** Utilities *******
+-- ***********************
+
+local function VNote(s)
+  ColourNote("orange", "", "[Vault Tracker] ", "silver", "", s)
+end
+
+local function Trim(s)
+  return (string.gsub(s, "^%s*(.-)%s*$", "%1"))
+end
+
+-- Find a registered vault by (case-insensitive) name, returns roomid or nil
+local function FindVaultByName(sName)
+  sName = string.lower(Trim(sName or ""))
+  for roomid, v in pairs(tVaults) do
+    if (string.lower(v.name) == sName) then
+      return roomid
+    end
+  end
+  return nil
+end
+
+local function VaultCount()
+  local n = 0
+  for _ in pairs(tVaults) do n = n + 1 end
+  return n
+end
+
+-- Split "two swords, a hat and a badge" into a list of item strings
+function ParseItems(s)
+  s = Trim(string.gsub(s, "%.%s*$", ""))
+  local tItems = {}
+  for part in string.gmatch(s, "[^,]+") do
+    table.insert(tItems, Trim(part))
+  end
+  -- the final comma-part usually holds "X and Y" - split on the LAST " and "
+  if (#tItems > 0) then
+    local sLast = tItems[#tItems]
+    local sBefore, sAfter = string.match(sLast, "^(.*) and (.-)$")
+    if (sBefore ~= nil and sAfter ~= nil and sBefore ~= "" and sAfter ~= "") then
+      tItems[#tItems] = Trim(sBefore)
+      table.insert(tItems, Trim(sAfter))
+    end
+  end
+  return tItems
+end
+
+-- Pick a colour for a fullness phrase: green (empty) -> red (full)
+function FullnessColour(s)
+  s = string.lower(s or "")
+  if (s == "") then return DIM end
+  if (s == "empty") then return ColourNameToRGB("limegreen") end
+  if (string.find(s, "almost completely full", 1, true) ~= nil) then return ColourNameToRGB("orangered") end
+  if (string.find(s, "completely full", 1, true) ~= nil or s == "full") then return ColourNameToRGB("red") end
+  if (string.find(s, "three%-?quarters") ~= nil) then return ColourNameToRGB("orange") end
+  if (string.find(s, "half", 1, true) ~= nil) then return ColourNameToRGB("yellow") end
+  if (string.find(s, "quarter", 1, true) ~= nil) then return ColourNameToRGB("yellowgreen") end
+  return ColourNameToRGB("gold")
+end
+
+-- Return a copy of the item list sorted alphabetically by the text AFTER
+-- the first word (the first word is always a quantity: a/an/two/some/...)
+function SortedItems(tItems)
+  local t = {}
+  for i, s in ipairs(tItems) do t[i] = s end
+  local function SortKey(s)
+    local sRest = string.match(s, "^%S+%s+(.*)$")
+    return string.lower(sRest or s)
+  end
+  table.sort(t, function(a, b) return SortKey(a) < SortKey(b) end)
+  return t
+end
+
+-- ***********************************
+-- ***** GMCP room id via CowBar *****
+-- ***********************************
+
+bSeenBroadcast = false
+
+function OnPluginBroadcast(msg, id, name, sDataLine)
+  if (id == COWBAR_ID) then
+    bSeenBroadcast = true
+  end
+  if (id == COWBAR_ID and string.sub(sDataLine, 1, 10) == "room.info ") then
+    local bOK, tData = pcall(json.decode, string.sub(sDataLine, 11))
+    if (bOK and type(tData) == "table" and tData["identifier"] ~= nil) then
+      if (sCurrentRoomID ~= tData["identifier"]) then
+        -- moving rooms cancels any half-finished capture
+        AbortCapture()
+      end
+      sCurrentRoomID = tData["identifier"]
+    end
+  end
+end
+
+-- Fires ~30s after install/connect: CowBar present but silent means its
+-- GMCP rebroadcast option is almost certainly switched off
+function OnVaultBroadcastCheck(sName)
+  if (bSeenBroadcast or IsConnected() == false) then return end
+  if (GetPluginInfo(COWBAR_ID, 1) == nil) then return end
+  ColourNote("red", "", "[Vault Tracker] No GMCP data received from Quow's CowBar!")
+  ColourNote("yellow", "", "[Vault Tracker] VaultTracker needs CowBar's rebroadcast to detect rooms:")
+  ColourNote("yellow", "", "[Vault Tracker]   RIGHT-CLICK the minimap and tick 'Re-Broadcast GMCP Data'.")
+  ColourNote("yellow", "", "[Vault Tracker] (This is a one-time setting - it persists in CowBar.)")
+end
+
+-- ****************************
+-- ***** Contents capture *****
+-- ****************************
+
+function AbortCapture()
+  bCapturing = false
+  sCaptureBuffer = ""
+  sCaptureRoom = ""
+  sCaptureContainer = ""
+  sCaptureFullness = ""
+  iCaptureLines = 0
+  EnableTrigger("VaultCaptureLine", false)
+end
+
+local function CommitCapture()
+  local roomid = sCaptureRoom
+  local sRaw = sCaptureBuffer
+  local sContainer = sCaptureContainer
+  local sFullness = sCaptureFullness
+  AbortCapture()
+  if (tVaults[roomid] == nil) then return end
+  local bNewLock = (tVaults[roomid].container == nil or tVaults[roomid].container == "")
+  if (bNewLock) then
+    VNote("Locked '" .. tVaults[roomid].name .. "' to container '" .. sContainer .. "' - other containers in this room are now ignored ('vault unlock' to re-bind).")
+  end
+  tVaults[roomid].items = ParseItems(sRaw)
+  tVaults[roomid].raw = sRaw
+  tVaults[roomid].container = sContainer
+  tVaults[roomid].fullness = sFullness
+  tVaults[roomid].updated = os.time()
+  SaveState()
+  VNote("Updated vault '" .. tVaults[roomid].name .. "' - " .. #tVaults[roomid].items .. " item entries.")
+  if (sActiveTab == "" or tVaults[sActiveTab] == nil) then
+    sActiveTab = roomid
+  end
+  iScroll = 0
+  DrawVaultWindow()
+end
+
+function OnVaultContentsStart(name, line, wildcards)
+  if (bCapturing) then return end
+  local v = tVaults[sCurrentRoomID]
+  if (v == nil) then return end
+  -- container lock: once bound, only accept lines from the vault's own container
+  if (v.container ~= nil and v.container ~= "" and v.container ~= wildcards[1]) then return end
+  local sItems, sFullness
+  if (name == "VaultContentsStart") then
+    sFullness = wildcards[2]
+    sItems = wildcards[3]
+  else -- "contains" variant has no fullness phrase
+    sFullness = ""
+    sItems = wildcards[2]
+  end
+  bCapturing = true
+  sCaptureRoom = sCurrentRoomID
+  sCaptureContainer = wildcards[1]
+  sCaptureFullness = sFullness
+  sCaptureBuffer = sItems
+  iCaptureLines = 0
+  if (string.match(line, "%.%s*$") ~= nil) then
+    CommitCapture()
+  else
+    -- list continues on following lines until one ends with a full stop
+    EnableTrigger("VaultCaptureLine", true)
+  end
+end
+
+function OnVaultCaptureLine(name, line, wildcards)
+  if (bCapturing == false) then return end
+  local sLine = Trim(wildcards[1])
+  iCaptureLines = iCaptureLines + 1
+  if (sLine == "" or iCaptureLines > 15) then
+    -- ran off the end of the list without a full stop; keep what we have
+    CommitCapture()
+    return
+  end
+  sCaptureBuffer = sCaptureBuffer .. " " .. sLine
+  if (string.match(sLine, "%.%s*$") ~= nil) then
+    CommitCapture()
+  end
+end
+
+function OnVaultEmpty(name, line, wildcards)
+  if (bCapturing) then return end
+  local v = tVaults[sCurrentRoomID]
+  if (v == nil) then return end
+  if (v.container ~= nil and v.container ~= "" and v.container ~= wildcards[1]) then return end
+  tVaults[sCurrentRoomID].items = {}
+  tVaults[sCurrentRoomID].raw = ""
+  tVaults[sCurrentRoomID].container = wildcards[1]
+  tVaults[sCurrentRoomID].fullness = "empty"
+  tVaults[sCurrentRoomID].updated = os.time()
+  SaveState()
+  VNote("Vault '" .. tVaults[sCurrentRoomID].name .. "' recorded as empty.")
+  DrawVaultWindow()
+end
+
+-- *******************
+-- ***** Aliases *****
+-- *******************
+
+function OnVaultAlias(name, line, wildcards)
+  local sCmd = string.lower(wildcards[1] or "")
+  local sArg = Trim(wildcards[2] or "")
+
+  if (sCmd == "register") then
+    if (sArg == "") then
+      VNote("Usage: vault register <name>   (stand in the vault room first)")
+      return
+    end
+    if (sCurrentRoomID == "") then
+      VNote("I don't know your current room yet - walk one room so CowBar broadcasts the GMCP room id, then try again.")
+      VNote("(If that doesn't help: right-click the minimap and tick 'Re-Broadcast GMCP Data'.)")
+      return
+    end
+    local sOld = FindVaultByName(sArg)
+    if (sOld ~= nil and sOld ~= sCurrentRoomID) then
+      VNote("A vault named '" .. sArg .. "' is already registered to another room. Use 'vault forget " .. sArg .. "' first.")
+      return
+    end
+    if (tVaults[sCurrentRoomID] ~= nil) then
+      tVaults[sCurrentRoomID].name = sArg
+      VNote("Renamed this room's vault to '" .. sArg .. "'.")
+    else
+      tVaults[sCurrentRoomID] = { name = sArg, items = nil, raw = "", updated = nil }
+      VNote("Registered vault '" .. sArg .. "' in room '" .. sCurrentRoomID .. "'. Now look in the container to record its contents.")
+    end
+    sActiveTab = sCurrentRoomID
+    SaveState()
+    DrawVaultWindow()
+
+  elseif (sCmd == "forget") then
+    local roomid = FindVaultByName(sArg)
+    if (roomid == nil) then
+      VNote("No vault named '" .. sArg .. "'. See 'vault list'.")
+      return
+    end
+    tVaults[roomid] = nil
+    if (sActiveTab == roomid) then sActiveTab = "" end
+    SaveState()
+    VNote("Forgot vault '" .. sArg .. "'.")
+    DrawVaultWindow()
+
+  elseif (sCmd == "list") then
+    if (VaultCount() == 0) then
+      VNote("No vaults registered. Stand in a vault room and type: vault register <name>")
+      return
+    end
+    VNote("Registered vaults:")
+    for roomid, v in pairs(tVaults) do
+      local sInfo = "(no contents recorded yet)"
+      if (v.items ~= nil) then
+        sInfo = #v.items .. " item entries, updated " .. os.date("%Y-%m-%d %H:%M", v.updated)
+      end
+      if (v.container ~= nil and v.container ~= "") then
+        sInfo = sInfo .. "  locked to '" .. v.container .. "'"
+      else
+        sInfo = sInfo .. "  (UNLOCKED - next look binds)"
+      end
+      ColourNote("orange", "", "  " .. v.name, "silver", "", "  [" .. roomid .. "]  " .. sInfo)
+    end
+
+  elseif (sCmd == "show") then
+    local roomid = (sArg ~= "" and FindVaultByName(sArg)) or sActiveTab
+    if (roomid == nil or roomid == "" or tVaults[roomid] == nil) then
+      VNote("No such vault. See 'vault list'.")
+      return
+    end
+    local v = tVaults[roomid]
+    if (v.items == nil) then
+      VNote("'" .. v.name .. "' has no recorded contents yet - go look in it.")
+      return
+    end
+    VNote("Contents of '" .. v.name .. "' (" .. #v.items .. " entries, updated " .. os.date("%Y-%m-%d %H:%M", v.updated) .. "):")
+    if (v.fullness ~= nil and v.fullness ~= "") then
+      ColourNote("yellow", "", "  " .. (v.container or "Container") .. " is " .. v.fullness .. ".")
+    end
+    for _, sItem in ipairs(SortedItems(v.items)) do
+      ColourNote("silver", "", "  " .. sItem)
+    end
+
+  elseif (sCmd == "find") then
+    if (sArg == "") then
+      VNote("Usage: vault find <text>")
+      return
+    end
+    local sSearch = string.lower(sArg)
+    local iHits = 0
+    for roomid, v in pairs(tVaults) do
+      if (v.items ~= nil) then
+        for _, sItem in ipairs(v.items) do
+          if (string.find(string.lower(sItem), sSearch, 1, true) ~= nil) then
+            ColourNote("orange", "", "  [" .. v.name .. "] ", "silver", "", sItem)
+            iHits = iHits + 1
+          end
+        end
+      end
+    end
+    VNote(iHits .. " match(es) for '" .. sArg .. "'.")
+
+  elseif (sCmd == "unlock") then
+    local roomid = (sArg ~= "" and FindVaultByName(sArg)) or sActiveTab
+    if (roomid == nil or roomid == "" or tVaults[roomid] == nil) then
+      VNote("No such vault. See 'vault list'.")
+      return
+    end
+    tVaults[roomid].container = ""
+    SaveState()
+    VNote("Unlocked '" .. tVaults[roomid].name .. "'. CAREFUL: the next container you look in while in that room will become its new bound container.")
+
+  elseif (sCmd == "window") then
+    bWindowVisible = not bWindowVisible
+    SaveState()
+    DrawVaultWindow()
+    VNote("Window " .. (bWindowVisible and "shown." or "hidden."))
+
+  else -- help / bare "vault"
+    VNote("Commands:")
+    ColourNote("orange", "", "  vault register <name>", "silver", "", "  - register the room you are standing in as a vault")
+    ColourNote("orange", "", "  vault list", "silver", "", "            - list registered vaults")
+    ColourNote("orange", "", "  vault show [name]", "silver", "", "     - print a vault's contents to the output window")
+    ColourNote("orange", "", "  vault find <text>", "silver", "", "     - search all vaults for an item")
+    ColourNote("orange", "", "  vault window", "silver", "", "          - show/hide the miniwindow")
+    ColourNote("orange", "", "  vault unlock [name]", "silver", "", "   - re-bind a vault to a different container")
+    ColourNote("orange", "", "  vault forget <name>", "silver", "", "   - unregister a vault")
+    VNote("Then just look in the container while standing in a registered vault room and the contents update automatically.")
+  end
+end
+
+-- **********************
+-- ***** Miniwindow *****
+-- **********************
+
+-- bResizing: called live during a resize drag - repaint only, do NOT recreate
+-- the window or touch hotspots (that would kill the active drag handler)
+function DrawVaultWindow(bResizing)
+  if (bWindowVisible == false or VaultCount() == 0) then
+    if (WindowInfo(win, 1) ~= nil) then WindowShow(win, false) end
+    return
+  end
+
+  if (bResizing) then
+    WindowResize(win, WIN_W, WIN_H, BG)
+  else
+    WindowCreate(win, iWinX, iWinY, WIN_W, WIN_H, 4, 2, BG)
+    WindowSetZOrder(win, 999)  -- CowBar uses 1..N, keep us above all of it
+  end
+  WindowFont(win, "f", "Lucida Console", 9, false, false, false, false)
+  WindowFont(win, "fb", "Lucida Console", 9, true, false, false, false)
+  iLineHeight = WindowFontInfo(win, "f", 1) + 2
+  if (not bResizing) then WindowDeleteAllHotspots(win) end
+  WindowRectOp(win, 2, 0, 0, 0, 0, BG)
+  WindowRectOp(win, 1, 0, 0, 0, 0, BORDER)
+
+  -- title bar
+  local TITLE_H = 22
+  WindowRectOp(win, 2, 1, 1, WIN_W - 1, TITLE_H, TABBG)
+  WindowText(win, "fb", "Vault Tracker", 8, 5, WIN_W - 30, TITLE_H, ACCENT)
+  WindowText(win, "fb", "X", WIN_W - 16, 5, WIN_W - 4, TITLE_H, DIM)
+  if (not bResizing) then
+    WindowAddHotspot(win, "close", WIN_W - 20, 1, WIN_W - 1, TITLE_H, "", "", "", "", "VaultCloseClick", "Hide window (re-open with 'vault window')", 1, 0)
+    WindowAddHotspot(win, "drag", 1, 1, WIN_W - 20, TITLE_H, "", "", "VaultDragMouseDown", "", "", "Drag to move", 10, 0)
+    WindowDragHandler(win, "drag", "VaultDragMove", "VaultDragRelease", 0)
+  end
+
+  -- tabs
+  local TAB_Y, TAB_H = TITLE_H + 2, 20
+  local x = 4
+  -- stable tab order: sort by name
+  local tOrder = {}
+  for roomid in pairs(tVaults) do table.insert(tOrder, roomid) end
+  table.sort(tOrder, function(a, b) return string.lower(tVaults[a].name) < string.lower(tVaults[b].name) end)
+  if (sActiveTab == "" or tVaults[sActiveTab] == nil) then sActiveTab = tOrder[1] end
+
+  for _, roomid in ipairs(tOrder) do
+    local v = tVaults[roomid]
+    local sLabel = v.name
+    if (v.items ~= nil) then sLabel = sLabel .. " (" .. #v.items .. ")" end
+    local w = WindowTextWidth(win, "f", sLabel) + 12 + 12  -- extra room for the fullness dot
+    -- wrap to a new tab row if this one is full
+    if (x > 4 and x + w > WIN_W - 4) then
+      x = 4
+      TAB_Y = TAB_Y + TAB_H + 2
+    end
+    local bActive = (roomid == sActiveTab)
+    WindowRectOp(win, 2, x, TAB_Y, x + w, TAB_Y + TAB_H, bActive and TABON or TABBG)
+    WindowRectOp(win, 1, x, TAB_Y, x + w, TAB_Y + TAB_H, bActive and ACCENT or BORDER)
+    -- fullness dot (hollow grey until a fullness has been recorded)
+    local iDotCY = TAB_Y + math.floor(TAB_H / 2)
+    if (v.fullness ~= nil and v.fullness ~= "") then
+      local iDotCol = FullnessColour(v.fullness)
+      WindowCircleOp(win, 2, x + 5, iDotCY - 4, x + 13, iDotCY + 4, iDotCol, 0, 1, iDotCol, 0)
+    else
+      WindowCircleOp(win, 2, x + 5, iDotCY - 4, x + 13, iDotCY + 4, DIM, 0, 1, 0, 1)
+    end
+    WindowText(win, "f", sLabel, x + 17, TAB_Y + 4, x + w, TAB_Y + TAB_H, bActive and ACCENT or FG)
+    if (not bResizing) then
+      WindowAddHotspot(win, "tab:" .. roomid, x, TAB_Y, x + w, TAB_Y + TAB_H, "", "", "", "", "VaultTabClick", "Show " .. v.name, 1, 0)
+    end
+    x = x + w + 3
+  end
+
+  -- info line, fullness line, items
+  local INFO_Y = TAB_Y + TAB_H + 4
+  local BODY_Y = INFO_Y + iLineHeight + 4
+  local v = tVaults[sActiveTab]
+  if (v ~= nil) then
+    local sInfo
+    if (v.items == nil) then
+      sInfo = "No contents recorded - go to the vault and look in the container."
+    else
+      sInfo = #v.items .. " item entries - updated " .. os.date("%Y-%m-%d %H:%M", v.updated)
+    end
+    WindowText(win, "f", sInfo, 8, INFO_Y, WIN_W - 8, INFO_Y + iLineHeight, DIM)
+    if (v.fullness ~= nil and v.fullness ~= "") then
+      local sFullLine = (v.container or "Container") .. " is " .. v.fullness .. "."
+      WindowText(win, "fb", sFullLine, 8, BODY_Y, WIN_W - 8, BODY_Y + iLineHeight, FullnessColour(v.fullness))
+      BODY_Y = BODY_Y + iLineHeight + 4
+    end
+    WindowLine(win, 4, BODY_Y - 2, WIN_W - 4, BODY_Y - 2, BORDER, 0, 1)
+
+    if (v.items ~= nil) then
+      local tShow = SortedItems(v.items)
+      local iVisible = math.floor((WIN_H - BODY_Y - 4) / iLineHeight)
+      local iMax = math.max(0, #tShow - iVisible)
+      if (iScroll > iMax) then iScroll = iMax end
+      if (iScroll < 0) then iScroll = 0 end
+      local y = BODY_Y + 2
+      for i = iScroll + 1, math.min(#tShow, iScroll + iVisible) do
+        WindowText(win, "f", tShow[i], 8, y, WIN_W - 24, y + iLineHeight, FG)
+        y = y + iLineHeight
+      end
+      -- scroll indicators (kept clear of the resize grip in the corner)
+      if (iMax > 0) then
+        WindowText(win, "fb", "^", WIN_W - 16, BODY_Y + 2, WIN_W - 4, BODY_Y + 2 + iLineHeight, (iScroll > 0) and ACCENT or DIM)
+        WindowText(win, "fb", "v", WIN_W - 16, WIN_H - iLineHeight - 24, WIN_W - 4, WIN_H - 24, (iScroll < iMax) and ACCENT or DIM)
+        if (not bResizing) then
+          WindowAddHotspot(win, "scrollup", WIN_W - 20, BODY_Y, WIN_W - 1, BODY_Y + 20, "", "", "", "", "VaultScrollUpClick", "Scroll up", 1, 0)
+          WindowAddHotspot(win, "scrolldown", WIN_W - 20, WIN_H - 44, WIN_W - 1, WIN_H - 20, "", "", "", "", "VaultScrollDownClick", "Scroll down", 1, 0)
+        end
+      end
+      if (not bResizing) then
+        WindowAddHotspot(win, "body", 1, BODY_Y, WIN_W - 21, WIN_H - 1, "", "", "", "", "", "", 0, 0)
+        WindowScrollwheelHandler(win, "body", "VaultWheel")
+      end
+    end
+  end
+
+  -- resize grip (bottom-right corner)
+  for i = 4, 12, 4 do
+    WindowLine(win, WIN_W - i - 2, WIN_H - 2, WIN_W - 2, WIN_H - i - 2, DIM, 0, 1)
+  end
+  if (not bResizing) then
+    WindowAddHotspot(win, "zzresize", WIN_W - 16, WIN_H - 16, WIN_W - 1, WIN_H - 1, "", "", "VaultResizeMouseDown", "", "", "Drag to resize", 6, 0)
+    WindowDragHandler(win, "zzresize", "VaultResizeMove", "VaultResizeRelease", 0)
+  end
+
+  WindowShow(win, true)
+end
+
+-- window callbacks
+function VaultCloseClick(flags, id)
+  bWindowVisible = false
+  SaveState()
+  DrawVaultWindow()
+end
+
+function VaultTabClick(flags, id)
+  sActiveTab = string.sub(id, 5)
+  iScroll = 0
+  DrawVaultWindow()
+end
+
+function VaultScrollUpClick(flags, id)
+  iScroll = iScroll - 5
+  DrawVaultWindow()
+end
+
+function VaultScrollDownClick(flags, id)
+  iScroll = iScroll + 5
+  DrawVaultWindow()
+end
+
+function VaultWheel(flags, id)
+  if (bit.band(flags, 0x100) ~= 0) then
+    iScroll = iScroll + 3
+  else
+    iScroll = iScroll - 3
+  end
+  DrawVaultWindow()
+end
+
+function VaultDragMouseDown(flags, id)
+  iDragStartX, iDragStartY = WindowInfo(win, 14), WindowInfo(win, 15)
+end
+
+function VaultDragMove(flags, id)
+  local posx, posy = WindowInfo(win, 17), WindowInfo(win, 18)
+  iWinX, iWinY = posx - iDragStartX, posy - iDragStartY
+  WindowPosition(win, iWinX, iWinY, 0, 2)
+end
+
+function VaultDragRelease(flags, id)
+  SaveState()
+end
+
+local iResizeStartX, iResizeStartY, iResizeStartW, iResizeStartH = 0, 0, 0, 0
+
+function VaultResizeMouseDown(flags, id)
+  iResizeStartX, iResizeStartY = WindowInfo(win, 17), WindowInfo(win, 18)
+  iResizeStartW, iResizeStartH = WIN_W, WIN_H
+end
+
+function VaultResizeMove(flags, id)
+  local mx, my = WindowInfo(win, 17), WindowInfo(win, 18)
+  local newW = math.max(MIN_W, iResizeStartW + (mx - iResizeStartX))
+  local newH = math.max(MIN_H, iResizeStartH + (my - iResizeStartY))
+  if (newW ~= WIN_W or newH ~= WIN_H) then
+    WIN_W, WIN_H = newW, newH
+    DrawVaultWindow(true)  -- repaint only, keep hotspots/drag alive
+  end
+end
+
+function VaultResizeRelease(flags, id)
+  SaveState()
+  DrawVaultWindow()  -- full rebuild so hotspots match the new size
+end
+
+-- *****************************
+-- ***** State persistence *****
+-- *****************************
+
+function OnPluginSaveState()
+  SetVariable("vault_data", serialize.save_simple(tVaults))
+  SetVariable("win_x", iWinX)
+  SetVariable("win_y", iWinY)
+  SetVariable("win_w", WIN_W)
+  SetVariable("win_h", WIN_H)
+  SetVariable("win_visible", bWindowVisible and "1" or "0")
+  SetVariable("active_tab", sActiveTab)
+end
+
+function OnPluginInstall()
+  local s = GetVariable("vault_data")
+  if (s ~= nil and s ~= "") then
+    local f = loadstring("return " .. s)
+    if (f ~= nil) then
+      local bOK, t = pcall(f)
+      if (bOK and type(t) == "table") then tVaults = t end
+    end
+  end
+  iWinX = tonumber(GetVariable("win_x")) or 100
+  iWinY = tonumber(GetVariable("win_y")) or 100
+  WIN_W = math.max(MIN_W, tonumber(GetVariable("win_w")) or 500)
+  WIN_H = math.max(MIN_H, tonumber(GetVariable("win_h")) or 460)
+  bWindowVisible = (GetVariable("win_visible") ~= "0")
+  sActiveTab = GetVariable("active_tab") or ""
+
+  if (GetPluginInfo(COWBAR_ID, 1) == nil) then
+    VNote("WARNING: Quow's CowBar (minimap) plugin not found - room detection needs its GMCP rebroadcast.")
+  end
+  VNote("Loaded. Type 'vault help' for commands.")
+  DrawVaultWindow()
+  if (IsConnected()) then
+    EnableTimer("VaultBroadcastCheck", true)
+    ResetTimer("VaultBroadcastCheck")
+  end
+end
+
+function OnPluginConnect()
+  bSeenBroadcast = false
+  EnableTimer("VaultBroadcastCheck", true)
+  ResetTimer("VaultBroadcastCheck")
+end
+
+function OnPluginClose()
+  if (WindowInfo(win, 1) ~= nil) then WindowDelete(win) end
+end
+
+function OnPluginDisable()
+  if (WindowInfo(win, 1) ~= nil) then WindowShow(win, false) end
+end
+
+function OnPluginEnable()
+  DrawVaultWindow()
+end
+
+]]>
+</script>
+</muclient>
