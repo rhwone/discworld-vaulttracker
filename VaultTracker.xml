@@ -22,10 +22,6 @@
   <alias enabled="y" match="^vault(?:\s+(register|show|list|forget|window|find|unlock|help)(?:\s+(.+?))?)?\s*$" regexp="y" ignore_case="y" script="OnVaultAlias" sequence="100"></alias>
 </aliases>
 
-<timers>
-  <timer name="VaultBroadcastCheck" second="30" enabled="n" one_shot="y" script="OnVaultBroadcastCheck"></timer>
-</timers>
-
 <triggers>
   <trigger enabled="y" keep_evaluating="y" match="^(.+?) (?:is|are) ([a-z\- ]*?full) (?:with|of) (.*)$" regexp="y" script="OnVaultContentsStart" sequence="50" name="VaultContentsStart"></trigger>
   <trigger enabled="y" keep_evaluating="y" match="^(.+?) contains (.*)$" regexp="y" script="OnVaultContentsStart" sequence="51" name="VaultContentsStart2"></trigger>
@@ -154,7 +150,7 @@ end
 -- ***** GMCP room id via CowBar *****
 -- ***********************************
 
-bSeenBroadcast = false
+bSeenBroadcast = false  -- any traffic at all from CowBar (used for diagnostics)
 
 function OnPluginBroadcast(msg, id, name, sDataLine)
   if (id == COWBAR_ID) then
@@ -172,15 +168,22 @@ function OnPluginBroadcast(msg, id, name, sDataLine)
   end
 end
 
--- Fires ~30s after install/connect: CowBar present but silent means its
--- GMCP rebroadcast option is almost certainly switched off
-function OnVaultBroadcastCheck(sName)
-  if (bSeenBroadcast or IsConnected() == false) then return end
-  if (GetPluginInfo(COWBAR_ID, 1) == nil) then return end
-  ColourNote("red", "", "[Vault Tracker] No GMCP data received from Quow's CowBar!")
-  ColourNote("yellow", "", "[Vault Tracker] VaultTracker needs CowBar's rebroadcast to detect rooms:")
-  ColourNote("yellow", "", "[Vault Tracker]   RIGHT-CLICK the minimap and tick 'Re-Broadcast GMCP Data'.")
-  ColourNote("yellow", "", "[Vault Tracker] (This is a one-time setting - it persists in CowBar.)")
+-- Explain why we have no room id, tailored to what we can actually detect
+function ExplainNoRoomID()
+  ColourNote("red", "", "[Vault Tracker] I don't know which room you are in, so I can't register a vault here.")
+  if (GetPluginInfo(COWBAR_ID, 1) == nil) then
+    ColourNote("yellow", "", "[Vault Tracker] Quow's CowBar (minimap) plugin isn't installed - VaultTracker needs it")
+    ColourNote("yellow", "", "[Vault Tracker] for room detection. Install it, then try again.")
+  elseif (bSeenBroadcast == false) then
+    ColourNote("yellow", "", "[Vault Tracker] CowBar is installed but hasn't sent any data, so its rebroadcast is")
+    ColourNote("yellow", "", "[Vault Tracker] probably switched off. Fix it like this:")
+    ColourNote("yellow", "", "[Vault Tracker]   RIGHT-CLICK the minimap  ->  tick 'Re-Broadcast GMCP Data'")
+    ColourNote("yellow", "", "[Vault Tracker] Then walk one room and type 'vault register <name>' again.")
+    ColourNote("yellow", "", "[Vault Tracker] (One-time setting - CowBar remembers it.)")
+  else
+    ColourNote("yellow", "", "[Vault Tracker] CowBar is talking to me, but hasn't reported a room id yet - some rooms")
+    ColourNote("yellow", "", "[Vault Tracker] send no GMCP data. Walk one room (or step out and back in), then try again.")
+  end
 end
 
 -- ****************************
@@ -294,8 +297,7 @@ function OnVaultAlias(name, line, wildcards)
       return
     end
     if (sCurrentRoomID == "") then
-      VNote("I don't know your current room yet - walk one room so CowBar broadcasts the GMCP room id, then try again.")
-      VNote("(If that doesn't help: right-click the minimap and tick 'Re-Broadcast GMCP Data'.)")
+      ExplainNoRoomID()
       return
     end
     local sOld = FindVaultByName(sArg)
@@ -767,16 +769,10 @@ function OnPluginInstall()
   end
   VNote("Loaded. Type 'vault help' for commands.")
   DrawVaultWindow()
-  if (IsConnected()) then
-    EnableTimer("VaultBroadcastCheck", true)
-    ResetTimer("VaultBroadcastCheck")
-  end
 end
 
 function OnPluginConnect()
   bSeenBroadcast = false
-  EnableTimer("VaultBroadcastCheck", true)
-  ResetTimer("VaultBroadcastCheck")
 end
 
 function OnPluginClose()
